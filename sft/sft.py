@@ -3,7 +3,7 @@
 '''
  Author       : Xuexin
  Date         : 2024-05-07 10:32:43
- LastEditTime : 2024-05-07 18:15:43
+ LastEditTime : 2024-05-08 10:28:36
  FilePath     : \\self_llm\\sft\\sft.py
  Description  : 
 '''
@@ -29,18 +29,9 @@ import evaluate
 import torch
 import transformers
 from datasets import load_dataset
-from transformers import (
-    CONFIG_MAPPING,
-    MODEL_FOR_CAUSAL_LM_MAPPING,
-    AutoConfig,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    HfArgumentParser,
-    Trainer,
-    TrainingArguments,
-    default_data_collator,
-    set_seed,
-)
+from transformers import (CONFIG_MAPPING, MODEL_FOR_CAUSAL_LM_MAPPING,
+                          AutoConfig, AutoModelForCausalLM, AutoTokenizer,
+                          HfArgumentParser, Trainer, TrainingArguments,
                           default_data_collator, set_seed)
 from transformers.testing_utils import CaptureLogger
 from transformers.trainer_utils import get_last_checkpoint
@@ -79,7 +70,7 @@ class DataTrainingArguments:
         default=None,
         metadata={
             "help": ("调试使用的最大评估数据量。会在评估数据中取出指定数量的数据",
-                     "例如：评估集有1000条数据，max_eval_samples=100，那么只取100条数据进行评估")
+                "例如：评估集有1000条数据，max_eval_samples=100，那么只取100条数据进行评估")
         }
     )
     streaming: bool = field(default=False, metadata={"help": "是否使用流式输出"})
@@ -105,3 +96,21 @@ class DataTrainingArguments:
     keep_linebreaks: bool = field(
         default=True, metadata={"help": "使用TXT文件时是否保留换行符."}
     )
+
+    def __post_init__(self):
+        """
+        类实例化后再执行的操作，此处用于版本、数据的校验
+        """
+        if self.streaming:
+            require_version("datasets>=2.0.0", "The streaming feature requires `datasets>=2.0.0`")
+        
+        if self.dataset_name is None and self.train_file is None and self.validation_file is None:
+            raise ValueError("Need either a dataset name or a training/validation file.")
+        else:
+            if self.train_file is not None:
+                extension = self.train_file.split(".")[-1] # assert 条件, assert报错信息
+                assert extension in ["csv","json","txt"], "“train_file” should be a csv, a json or a txt file."
+            if self.validation_file is not None:
+                extension = self.validation_file.split(sep=".")[-1]
+                assert extension in ["csv","json","txt"], "“validation_file” should be a csv, a json or a txt file."
+
