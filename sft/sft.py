@@ -3,7 +3,7 @@
 '''
  Author       : Xuexin
  Date         : 2024-05-07 10:32:43
- LastEditTime : 2024-05-08 14:53:45
+ LastEditTime : 2024-05-08 18:18:38
  FilePath     : \\self_llm\\sft\\sft.py
  Description  : 
 '''
@@ -231,3 +231,7 @@ class ModelArguments:
             raise ValueError(
                 "--config_overrides can't be used in combination with --config_name or --model_name_or_path"
             )
+
+
+def main():
+    pass
