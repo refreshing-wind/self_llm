@@ -234,4 +234,152 @@ class ModelArguments:
 
 
 def main():
-    pass
+    # 查看 src/transformers/training_args.py 中所有可能的参数
+    # 或者通过将 --help 标志传递给此脚本。
+    # 我们现在保留不同的参数集，以便更清晰地分离关注点。
+    parser = HfArgumentParser((ModelArguments, DataTrainingArguments, TrainingArguments))
+
+    # 两钟参数获取方式
+    if len(sys.argv) == 2 and sys.argv[1].endswith(".json"):
+        # 如果我们只向脚本传递一个参数，它是 json 文件的路径，
+        # 让我们解析它来获取我们的参数。
+        model_args, data_args, training_args = parser.parse_json_file(json_file=os.path.abspath(sys.argv[1]))
+    else:
+        model_args, data_args, training_args = parser.parse_args_into_dataclasses()
+
+    # 鉴权参数校验，目前仅支持'token'
+    if model_args.use_auth_token is not None:
+        warning.warn(
+            "The 'use_auth_token' argument is deprecated and will be removed in v4.34. Please use 'token' instead",
+            FutureWarning,
+        )
+        if model_arg.token is not None:
+            raise ValueError("'token'and‘use_auth_token’ are both specified. Please set only the argument ‘token’.")
+        model_args.token = model_args.use_auth_token
+
+
+    # 给huggingface发送使用数据
+    send_example_telemetry("run_clm", model_args, data_args) 
+
+    # 日志
+    logging.basicConfig(
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+        datefmt="%m/%d/%Y %H:%M:%S",
+        handlers=[logging.StreamHandler(sys.stdout)] 
+    )  # sys.stdout是Python中sys模块的一部分，它表示标准输出流。表示流式输出
+
+    if training_args.should_log:
+        # training_args.log_level的默认值是被动的，所以我们在这里将日志级别设置为info以获得该默认值。
+        transformers.utils.logging.set_verbosity_info()
+
+    log_level = training_args.get_process_log_level()
+    logger.setLevel(log_level)
+    datasets.utils.logging.set_verbosity(log_level) # 数据集参数日志设置
+
+    transformers.utils.logging.set_verbosity(log_level) # transformers参数设置
+    transformers.utils.logging.enable_default_handler()
+    transformers.utils.logging.enable_explicit_format()
+
+    # 一些使用参数的日志
+    logger.warning(
+        f"Process rank:{training_args.local_rank}, device: {training_args.device}, n_gpu: {training_args.n_gpu},"
+        + f"distributed training: {training_args.parallel_model.value== 'distributed'}，16-bits training: {training_args.fp16}"
+    )
+    logger.info(f"Training/evaluation parameters {training_args}")
+
+    # 检测最后的检查点
+    last_checkpoint = None
+    if os.path.isdir(training_args.output_dir) and training_args.do_train and not training_args.overwrite_output_dir:
+        last_checkpoint = get_last_checkpoint(training_args.output_dir)
+        if last_checkpoint is None and len(os.listdir(training_args.output_dir))>0:
+            raise ValueError(
+                f"Output directory({training_args.output_dir}) already exists and is not empty",
+                "Use --overwrite_output_dir to overcome"
+            )
+        elif last_checkpoint is not None and training_args.resume_from_checkpoint is None:
+            logger.info(
+                f"Checkpoint detected, resuming training at {last_checkpoint}, To avoid this behavior,change",
+                "the ‘--output_dir’ or add ’--overwrite_output_dir‘ to train from scratch",
+                "检测到检查点，正在｛last_Checkpoint｝恢复训练，要避免这种行为，请更改”使用'--output_dir'或添加'--overwrite_output_dir'从头开始训练”，"
+            )
+
+    # 在初始化模型之前设置随机种子
+    set_seed(training_args.seed)
+    #获取数据集：您可以提供自己的CSV/JSON/TXT培训和评估文件（见下文）
+    #或者只提供hub上可用的公共数据集之一的名称https://huggingface.co/datasets/
+    #（数据集将自动从数据集中心下载）。
+    #
+    #对于CSV/JSON文件，此脚本将使用名为“text”的列，如果没有名为
+    #找到“text”。您可以很容易地调整这种行为（见下文）。
+    #
+    #在分布式训练中，load_dataset函数保证只有一个本地进程可以同时加载数据集。
+    if data_args.dataset_name is not None:
+        # 从hub下载并加载数据集
+        raw_datasets = load_dataset(
+            data_args.dataset_name,
+            data_args.dataset_config_name,
+            cache_dir=model_args.cache_dir,
+            token=model_args.token,
+            streaming=data_args.streaming,
+        )
+        if "validation" not in raw_datasets.keys(): # 如果没有配置验证集，从训练集中切分验证集和新的训练集
+            raw_datasets["validation"] = load_dataset(
+                data_args.dataset_name,
+                data_args.dataset_config_name,
+                split = f"train[:{data_args.validation_split_percentage}%]",
+                cache_dir=model_args.cache_dir,
+                token=model_args.token,
+                streaming=data_args.streaming,
+            )
+            raw_datasets["train"] = load_dataset(
+                data_args.dataset_name,
+                data_args.dataset_config_name,
+                split=f"train[{data_args.validation_split_percentage}%]",
+                cache_dir=model_arg.cache_dir,
+                token=model_args.token,
+                streaming=data_args.streaming,
+            )
+
+    else:
+        data_files = {}
+        dataset_args = {}
+        if data_args.train_file is not None:
+            data_files["train"] = data_args.train_file
+        if data_args.validation_file is not None:
+            data_files["validation"] = data_args.validation_file
+        extension = (
+            data_args.train_file.split(".")[-1]
+            if data_args.trin_file is not None
+            else data_args.validation_file.split(".")[-1]
+        )
+
+        if extension == "txt":
+            extension == "text"
+            dataset_args["keep_linebreaks"] = data_args.keep_linebreaks
+        raw_datasets = loas_dataset(
+            extension,
+            data_files=data_files,
+            cache_dir=model_arg.cache_dir,
+            token=model_args.token,
+            **dataset_args,
+        )
+
+
+        # 如果没有验证数据，则validation_split_percentage将用于分割数据集。
+        if "validation" not in raw_datasets.keys():
+            raw_datasets["validation"] = load_dataset(
+                extension,
+                data_files=data_files,
+                split=f"train[:{data_args.validation_split_percentage}%]",
+                cache_dir=model_args.cache_dir,
+                token=model_args.token,
+                **dataset_args
+            )
+            raw_datasets["train"] = load_dataset(
+                extension,
+                data_files=data_files,
+                split=f"train[{data_args.validation_split_percentage}%:]",
+                cache_dir=model_args.cache_dir,
+                token=model_args.token,
+                **dataset_args,
+            )
