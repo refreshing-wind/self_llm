@@ -3,7 +3,7 @@
 '''
  Author       : Xuexin
  Date         : 2024-05-07 10:32:43
- LastEditTime : 2024-05-08 18:18:38
+ LastEditTime : 2024-05-13 18:00:51
  FilePath     : \\self_llm\\sft\\sft.py
  Description  : 
 '''
@@ -29,18 +29,10 @@ import evaluate
 import torch
 import transformers
 from datasets import load_dataset
-from transformers import (
-    CONFIG_MAPPING,
-    MODEL_FOR_CAUSAL_LM_MAPPING,
-    AutoConfig,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    HfArgumentParser,
-    Trainer,
-    TrainingArguments,
-    default_data_collator,
-    set_seed,
-)
+from transformers import (CONFIG_MAPPING, MODEL_FOR_CAUSAL_LM_MAPPING,
+                          AutoConfig, AutoModelForCausalLM, AutoTokenizer,
+                          HfArgumentParser, Trainer, TrainingArguments,
+                          default_data_collator, set_seed)
 from transformers.testing_utils import CaptureLogger
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
@@ -206,7 +198,7 @@ class ModelArguments:
             )
         },
     )
-    token_dtype: Optional[str] = field(
+    torch_dtype: Optional[str] = field(
         default=None,
         metadata={"help": (
             "覆盖默认的‘torch.dtype’,并加载此类型的模型，如果设置'auto'",
@@ -249,24 +241,25 @@ def main():
 
     # 鉴权参数校验，目前仅支持'token'
     if model_args.use_auth_token is not None:
-        warning.warn(
+        warnings.warn(
             "The 'use_auth_token' argument is deprecated and will be removed in v4.34. Please use 'token' instead",
             FutureWarning,
         )
-        if model_arg.token is not None:
+        if model_args.token is not None:
             raise ValueError("'token'and‘use_auth_token’ are both specified. Please set only the argument ‘token’.")
         model_args.token = model_args.use_auth_token
 
 
     # 给huggingface发送使用数据
-    send_example_telemetry("run_clm", model_args, data_args) 
+    send_example_telemetry("run_clm", model_args, data_args)
 
     # 日志
     logging.basicConfig(
-        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s"
+        format="%(asctime)s - %(levelname)s - %(name)s - %(message)s",
         datefmt="%m/%d/%Y %H:%M:%S",
-        handlers=[logging.StreamHandler(sys.stdout)] 
+        handlers=[logging.StreamHandler(sys.stdout)]
     )  # sys.stdout是Python中sys模块的一部分，它表示标准输出流。表示流式输出
+    
 
     if training_args.should_log:
         # training_args.log_level的默认值是被动的，所以我们在这里将日志级别设置为info以获得该默认值。
@@ -335,7 +328,7 @@ def main():
                 data_args.dataset_name,
                 data_args.dataset_config_name,
                 split=f"train[{data_args.validation_split_percentage}%]",
-                cache_dir=model_arg.cache_dir,
+                cache_dir=model_args.cache_dir,
                 token=model_args.token,
                 streaming=data_args.streaming,
             )
@@ -356,10 +349,10 @@ def main():
         if extension == "txt":
             extension == "text"
             dataset_args["keep_linebreaks"] = data_args.keep_linebreaks
-        raw_datasets = loas_dataset(
+        raw_datasets = load_dataset(
             extension,
             data_files=data_files,
-            cache_dir=model_arg.cache_dir,
+            cache_dir=model_args.cache_dir,
             token=model_args.token,
             **dataset_args,
         )
@@ -383,3 +376,148 @@ def main():
                 token=model_args.token,
                 **dataset_args,
             )
+    
+    # 加载预训练模型和分词器
+    #
+    # 分布式训练：
+    # .from_pretrained 方法保证只有一个本地进程可以并发
+    # 下载模型和词汇。
+    config_kwargs = {
+        "cache_dir": model_args.cache_dir,
+        "revision": model_args.revision,
+        "token": model_args.token,
+        "trust_remote_code": model_args.trust_remote_code
+    }
+
+    if model_args.config_name:
+        config = AutoConfig.from_pretrained(model_args.config_name, **config_kwargs)
+    elif model_args.model_name_or_path:
+        config = AutoConfig.from_pretrained(model_args.model_name_or_path, **config_kwargs)
+    else:
+        config = CONFIG_MAPPING[model_args.model_type]()
+        logger.warning("You are instantiating a new config instance from scratch.")
+        if model_args.config_overrides is not None:
+            logger.info(f"Overriding config: {model_args.config_overrides}")
+            config.update_from_string(model_args.config_overrides)
+            logger.info(f"New config: {config}")
+
+    tokenizer_kwargs = {
+        "cache_dir": model_args.cache_dir,
+        "use_fast": model_args.use_fast_tokenizer,
+        "revision": model_args.model_revision,
+        "token": model_args.token,
+        "trust_remote_code": model_args.trust_remote_code,
+    }
+    # 加载分词器
+    if model_args.tokenizer_name:
+        tokenizer = AutoTokenizer.from_pretrained(model_args.tokenizer_name, **tokenizer_kwargs)
+    elif model_args.model_name_or_path:
+        tokenizer = AutoTokenizer.from_pretrained(model_args.model_name_or_path, **tokenizer_kwargs)
+    else:
+        raise ValueError(
+            "您正在从头开始实例化一个新的tokenizer。此脚本不支持此操作。",
+            "您可以使用--tokenizer_name从另一个脚本执行此操作，保存它，然后从这里加载它。"
+        )
+    
+    # 加载模型
+    if model_args.model_name_or_path:
+        torch_dtype = (
+            model_args.torch_dtype
+            if model_args.torch_dtype in ["auto", None]
+            else getattr(torch, model_args.torch_dtype) #getattr获取属性或取值
+            # 从torch中获取对应的torch_dtype
+            # 例如："float32 -> torch.float32
+        )
+        model = AutoModelForCausalLM.form_pretrained(
+            model_args.model_name_or_path,
+            from_tf= bool(".ckpt" in model_args.model_name_or_path),
+            config = config,
+            cache_dir = model_args.cache_dir,
+            revision = model_args.model_revison,
+            token = model_args.token,
+            trust_remote_code = model_args.trust_remote_code,
+            torch_dtype = torch_dtype,
+            low_cpu_mem_usage = model_args.low_cpu_mem_usage
+        )
+    else:
+        model = AutoModelForCausalLM.from_config(config, trust_remote_code = model_args.trust_remote_code)
+        n_params = sum({p.data_ptr() : p.numel() for p in model.parametres()}.values())
+        logger.info(f"从头开始训练一个新的模型 -模型总参数量：{n_params/2**20:.2f}M")
+
+
+    # 我们仅在必要时调整嵌入的大小以避免索引错误。 如果您要在小词汇上从头开始创建模型并且想要较小的嵌入大小，请删除此测试。
+    embedding_size = model.get_inpt_embeddings().weight.shape[0]
+    if len(tokenizer) > embedding_size:
+        model.resize_token_embeddings(len[tokenizer])
+
+
+    # 预处理数据集。
+    # 首先我们对所有文本进行序列化。
+    if training_args.do_train:
+        column_names = list(raw_datasets['train'].features) # 获取列名
+    else:
+        column_names = list(raw_datasets["validation"].features)
+
+    text_column_name = "text" if "text" in column_names else column_names[0]
+    # 将对象序列化以避免在哈希器中出现_LazyModule错误。在对tokenize_function进行序列化之前，需要先强制加载日志记录器。
+    tok_logger = transformers.utils.logging.get_logger("transformers.tokenization_utils_base")
+
+    def tokenize_function(examples):
+        with CaptureLogger(tok_logger) as cl: # 实例化捕获器
+            output = tokenizer(examples[text_column_name])
+        # clm 输入可能比 block_size 长得多
+        if "Token indices sequence length is longer than the" in cl.out:
+            tok_logger.warning(
+                "^^^^^^^^^^^^^^^^ 请忽略上面的警告 - 这个长输入在传递给模型之前将被分成更小的部分。”"
+            )
+        return output
+
+    with training_args.main_process_first(desc="dataset map tokenization"):
+        """
+        上下文管理器，作用是在使用分布式训练时，确保在其他进程开始训练之前，主进程（rank 0）先执行某些操作。
+        除了主进程之外的其他进程不会执行 main_process_first 上下文管理器中的代码。
+        main_process_first 上下文管理器的目的是确保某些操作在分布式环境中只由主进程执行一次，然后将结果广播到其他所有进程。
+        """
+        if not data_args.streaming:
+            # 加载全部数据集
+            tokenized_datasets = raw_datasets.map(
+                tokenize_function,
+                batched=True,
+                num_proc = data_args.preprocessing_num_worksers,
+                remove_columns=column_names,
+                load_from_cache_file=not data_args.overwrite_cache,
+                desc="序列化数据集",
+                
+            )
+        else:
+            # 流式加载数据集
+            tokenized_datasets, _ = raw_datasets.map(
+                tokenize_function,
+                batched=True,
+                remove_columns=column_names,
+            )
+
+    if hasattr(config, "max_position_embeddings"):
+        max_pos_embeddings = config.max_position_embeddings
+    else:
+        # 设置默认值
+        max_pos_embeddings = 1024
+
+    if data_args.block_size is None:
+        block_size = tokenizer.model_max_length
+        if block_size > max_pos_embeddings:
+            logger.warning(
+                f"选择的分词器似乎有一个非常大的“model_max_length” ({tokenizer.model_max_length}). "
+                f"我们将使用“block_size”设置为={min(1024, max_pos_embeddings)}。您可以通过传递 --block_size xxx 来更改该默认值"
+            )
+            if max_pos_embeddings >0:
+                block_size = min(1024, max_pos_embeddings)
+            else:
+                block_size = 1024
+    else:
+        if data_args.block_size > tokenizer.model_max_length:
+            logger.warning(
+                f"传递的 block_size ({data_args.block_size}) 大于模型的最大长度"
+                    f"({tokenizer.model_max_length})。使用 block_size={tokenizer.model_max_length}。"
+            )
+        block_size = min(data_args.block_size, tokenizer.model_max_length)
