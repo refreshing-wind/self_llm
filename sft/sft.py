@@ -3,7 +3,7 @@
 '''
  Author       : Xuexin
  Date         : 2024-05-07 10:32:43
- LastEditTime : 2024-05-13 18:00:51
+ LastEditTime : 2024-05-14 18:07:25
  FilePath     : \\self_llm\\sft\\sft.py
  Description  : 
 '''
@@ -29,10 +29,18 @@ import evaluate
 import torch
 import transformers
 from datasets import load_dataset
-from transformers import (CONFIG_MAPPING, MODEL_FOR_CAUSAL_LM_MAPPING,
-                          AutoConfig, AutoModelForCausalLM, AutoTokenizer,
-                          HfArgumentParser, Trainer, TrainingArguments,
-                          default_data_collator, set_seed)
+from transformers import (
+    CONFIG_MAPPING,
+    MODEL_FOR_CAUSAL_LM_MAPPING,
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    HfArgumentParser,
+    Trainer,
+    TrainingArguments,
+    default_data_collator,
+    set_seed,
+)
 from transformers.testing_utils import CaptureLogger
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
@@ -90,7 +98,7 @@ class DataTrainingArguments:
         )}
     )
     overwrite_cache: bool = field(
-        default=False, metadata={"help": "覆盖缓存的训练集和评估集，一个命令行参数，指示在缓存存在的情况下覆盖缓存。"}
+        default=False, metadata={"help": "覆盖缓存的训练集和评估集，一个命令行参数，覆盖现有缓存。"}
     )
     validation_split_percentage:Optional[int] = field(
         default=5,
@@ -486,6 +494,8 @@ def main():
                 num_proc = data_args.preprocessing_num_worksers,
                 remove_columns=column_names,
                 load_from_cache_file=not data_args.overwrite_cache,
+                # 如果load_from_cache_file设置为 True，datasets 库将尝试从磁盘加载预先存在的缓存文件，而不是重新运行预处理步骤。
+                # 如果load_from_cache_file设置为 False，datasets 库将重新运行预处理步骤，并将结果保存到缓存文件中
                 desc="序列化数据集",
                 
             )
@@ -496,6 +506,7 @@ def main():
                 batched=True,
                 remove_columns=column_names,
             )
+            # 流式加载数据集并且batched=True可以逐个批次的处理数据
 
     if hasattr(config, "max_position_embeddings"):
         max_pos_embeddings = config.max_position_embeddings
@@ -521,3 +532,118 @@ def main():
                     f"({tokenizer.model_max_length})。使用 block_size={tokenizer.model_max_length}。"
             )
         block_size = min(data_args.block_size, tokenizer.model_max_length)
+        # block_size是用于分块的最大长度，即输入模型的序列长度
+    
+
+    #主要的数据处理功能，它将连接数据集中的所有文本，并生成block_size块。
+    def group_texts(examples):
+        # 连接全部文本并分块
+        concatenated_examples = {k: list(chain(*examples[k])) for k in examples.keys()}
+        # *用于连接列表，chain()将多个列表连接为一个列表
+        total_length = len(concatenated_examples[list(examples.keys())[0]]) # 计算字典第一个要素的总长度
+        # 计算字典第一个要素的总长度即计算全部的token数
+        # 我们删除小的余数，如果total_length < block_size，我们排除该批次并返回一个空字典。
+        # 如果模型支持，我们可以添加填充而不是这个 drop，您可以根据您的需要自定义这部分。
+        total_length = (total_length // block_size) * block_size
+        # 按 max_len 块分割。
+        result = {
+            k: [t[i:i+block_size] for i in range(0, total_length, block_size)]
+            for k, t in concatenated_examples.items()
+        }
+        result["label"] = result["input_ids"].copy()
+        return result
+
+    # 请注意，使用 `batched=True` 时，此映射会一起处理 1,000 个文本，因此 group_texts 会丢弃最后不足1,000的剩余部分
+    # 对于每组 1,000 条文本。 您可以在此处调整该batch_size，但较高的值可能会导致预处理速度变慢(内存占用)。
+    #
+    # 为了加快这部分的速度，我们使用多处理。 有关详细信息，请参阅 map 方法的文档：
+    # https://huggingface.co/docs/datasets/process#map
+    with training_args.main_process_first(desc="grouping texts together"):
+        # 连接全部文本并分块
+        if not data_args.training:
+            lm_datasets = tokenized_datasets.map(
+                group_texts,
+                batched=True,
+                num_proc = data_args.preprocessing_num_workers,
+                load_from_cache_file = not data_args.overwrite_cache,
+                desc=f"Groping texts in chunks of {block_size}"
+            )
+        else:
+            lm_datasets = tokenized_datasets.map(
+                group_texts,
+                batched=True
+            )
+
+    if training_args.do_train:
+        if "train" not in tokenized_datasets:
+            raise ValueError("--do_train requires a train dataset")
+        train_dataset = lm_datasets["train"]
+        if data_args.max_train_samples is not None:
+            max_train_samples = min(len(train_dataset), data_args.max_train_samples)
+            train_dataset = train_dataset.select(range(max_train_samples))
+    
+    if training_args.do_eval:
+        if "valiation" not in tokenized_datasets:
+            raise ValueError("--do_eval requires a valiation dataset")
+        eval_dataset = lm_datasets["validation"]
+        if data_args.max_eval_samples is not None:
+            max_eval_samples = min(len(eval_dataset), data_args.max_eval_samples)
+            eval_dataset = eval_dataset.select(range(max_eval_samples))
+
+
+        def preprocess_logits_for_metrics(logits, labels):
+            # 这个函数通常在训练过程中用于将模型的原始输出转换为适合评估指标的格式。
+            # 取出概率类别最高的索引
+            if isinstance(logits, tuple):
+                # 计算 argmax(-1) 后，pred 与标签具有相同的形状
+                # 通过 preprocess_logits_for_metrics 但我们需要移动标签
+                logits = logits[0]
+            return logits.argmax(dim=-1)
+        # 加载参数
+        metric = evaluate.load("accuracy", cache_dir=model_args.cache_dir)
+        
+        def compute_metrics(eval_preds):
+            preds,labels = eval_preds
+            # preds have the same shape as the labels, after the argmax(-1) has been calculated
+            # by preprocess_logits_for_metrics but we need to shift the labels
+            # 在训练语言模型时，我们通常会忽略第一个标签，因为我们不能根据它来预测序列的第一个词。
+            # 同样，我们也会忽略最后一个标签，因为我们不能使用它来预测序列的最后一个词（因为没有真实的下一个词来比较）。
+            labels = labels[:, 1:].reshape(-1)
+            preds = preds[:, :-1].reshape(-1)
+            return metric.compute(predictions=preds, references=labels)
+        
+    # 初始化Trainer
+
+    trainer = Trainer(
+        model=model,
+        args = training_args,
+        train_dataset=train_dataset if training_args.do_train else None,
+        eval_dataset=eval_dataset if training_args.do_eval else None,
+        tokenizer=tokenizer,
+        # 数据整理器默认为DataCollatorWithPadding，因此我们更改它。
+        data_collator = default_data_collator,
+        compute_metrics = compute_metrics if training_args.do_eval else None,
+        preprocess_logits_for_metrics = preprocess_logits_for_metrics if training_args.do_eval else None
+    )
+
+    # 训练
+    if training_args.do_train:
+        checkpoint = None
+        # 优先使用从文件检查点恢复，否则选择使用训练过程中最后的检查点
+        if training_args.resume_from_checkpoint is not None:
+            checkpoint = training_args.resume_from_checkpoint
+        elif last_checkpoint is not None:
+            checkpoint = last_checkpoint
+        train_result = trainer.train(resume_from_chekpoint=checkpoint)
+        trainer.save_model() # 也保存标记器以便于上传
+
+        metrics = train_result.metrics
+
+        max_train_samples = (
+            data_args.max_train_samples if data_args.max_train_samples is not None else len(train_dataset)
+        )
+        metrics["train_samples"] = min(max_train_samples, len(train_dataset))
+
+        trainer.log_metrics("train", metrics)
+        trainer.save_metrics("train",metrics)
+        trainer.save_state()
