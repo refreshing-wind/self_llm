@@ -3,7 +3,7 @@
 '''
  Author       : Xuexin
  Date         : 2024-05-07 10:32:43
- LastEditTime : 2024-05-14 18:07:25
+ LastEditTime : 2024-05-15 18:02:53
  FilePath     : \\self_llm\\sft\\sft.py
  Description  : 
 '''
@@ -29,18 +29,10 @@ import evaluate
 import torch
 import transformers
 from datasets import load_dataset
-from transformers import (
-    CONFIG_MAPPING,
-    MODEL_FOR_CAUSAL_LM_MAPPING,
-    AutoConfig,
-    AutoModelForCausalLM,
-    AutoTokenizer,
-    HfArgumentParser,
-    Trainer,
-    TrainingArguments,
-    default_data_collator,
-    set_seed,
-)
+from transformers import (CONFIG_MAPPING, MODEL_FOR_CAUSAL_LM_MAPPING,
+                          AutoConfig, AutoModelForCausalLM, AutoTokenizer,
+                          HfArgumentParser, Trainer, TrainingArguments,
+                          default_data_collator, set_seed)
 from transformers.testing_utils import CaptureLogger
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
@@ -647,3 +639,44 @@ def main():
         trainer.log_metrics("train", metrics)
         trainer.save_metrics("train",metrics)
         trainer.save_state()
+
+
+    # 评估
+    if training_args.do_eval:
+        logger.info("*** 评估 ***")
+
+        metrics = trainer.evaluate()
+
+        max_eval_samples = data_args.max_eval_samples if data_args.max_eval_samples is not None else len(eval_dataset)
+        metrics["eval_samples"] = min(max_eval_samples, len(eval_dataset))
+        # 计算困惑度
+        try:
+            perplexity = math.exp(metrics["eval_loss"])
+        except OverflowError:
+            perplexity = float("inf")
+        metrics["perplexity"] = perplexity
+
+        trainer.log_metrics("eval", metrics)
+        trainer.save_metrics("eval", metrics)
+
+
+
+    kwargs = {"finetuned_from": model_args.model_name_or_path, "tasks":"text-generation"}
+    if data_args.dataset_name is not None:
+        kwargs["dataset_tags"] = data_args.dataset_name
+        if data_args.dataset_config_name is not None:
+            kwargs["dataset_arg"] = data_args.dataset_config_name
+            kwargs["dataset"] = f"{data_args.dataset_name} {data_args.dataset_config_name}"
+        else:
+            kwargs["dataset"] = data_args.dataset_name
+
+
+    # 推送到huggingface
+    if training_args.push_to_hub:
+        trainer.push_to_hub(**kwargs)
+    else:
+        trainer.create_model_card(**kwargs)
+
+
+if __name__ == "__main__":
+    main()
