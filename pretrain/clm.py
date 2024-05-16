@@ -3,8 +3,8 @@
 '''
  Author       : Xuexin
  Date         : 2024-05-07 10:32:43
- LastEditTime : 2024-05-15 18:02:53
- FilePath     : \\self_llm\\sft\\sft.py
+ LastEditTime : 2024-05-16 13:32:35
+ FilePath     : \\self_llm\\pretrain\\clm.py
  Description  : 
 '''
 
@@ -29,10 +29,18 @@ import evaluate
 import torch
 import transformers
 from datasets import load_dataset
-from transformers import (CONFIG_MAPPING, MODEL_FOR_CAUSAL_LM_MAPPING,
-                          AutoConfig, AutoModelForCausalLM, AutoTokenizer,
-                          HfArgumentParser, Trainer, TrainingArguments,
-                          default_data_collator, set_seed)
+from transformers import (
+    CONFIG_MAPPING,
+    MODEL_FOR_CAUSAL_LM_MAPPING,
+    AutoConfig,
+    AutoModelForCausalLM,
+    AutoTokenizer,
+    HfArgumentParser,
+    Trainer,
+    TrainingArguments,
+    default_data_collator,
+    set_seed,
+)
 from transformers.testing_utils import CaptureLogger
 from transformers.trainer_utils import get_last_checkpoint
 from transformers.utils import check_min_version, send_example_telemetry
@@ -652,6 +660,7 @@ def main():
         # 计算困惑度
         try:
             perplexity = math.exp(metrics["eval_loss"])
+            # 通过对平均交叉熵取指数(exp)得到困惑度。困惑度越低，表示语言模型有更好的预测能力。
         except OverflowError:
             perplexity = float("inf")
         metrics["perplexity"] = perplexity
